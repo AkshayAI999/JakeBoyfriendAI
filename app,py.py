@@ -1,14 +1,24 @@
 import streamlit as st
 import random
 import time
-import base64 # For potentially handling image uploads (though conversion is conceptual)
+import json # For parsing API response
+# No direct image generation or complex TTS libraries are imported here,
+# as they would require separate models/APIs beyond basic LLM.
 
 # --- Configuration & Setup ---
 ST_CONFIG = {
-    "page_title": "Hi, Jake here!",
+    "page_title": "Jake: Your Personalized AI Companion",
     "page_icon": "🫂", # Placeholder icon
     "layout": "wide",
 }
+
+# --- Google Gemini API Configuration (Free Tier: gemini-2.0-flash) ---
+# IMPORTANT: In a deployed app, you'd securely load this from .streamlit/secrets.toml
+# For local testing, you might temporarily set it as an environment variable or hardcode (NOT RECOMMENDED for production)
+# Example of how it *would* be loaded securely in a Streamlit Cloud deployment:
+# GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
+# For this Canvas environment, leaving it as an empty string should allow the runtime to inject it.
+GEMINI_API_KEY = "" # Leave as empty string for Canvas runtime to provide it.
 
 # --- Session State Initialization ---
 # This is crucial for Streamlit to remember user choices and chat history
@@ -40,104 +50,157 @@ if "user_preferences" not in st.session_state:
 if "long_term_memory_snippets" not in st.session_state:
     st.session_state.long_term_memory_snippets = []
 
-# --- Conceptual AI & Avatar Functions ---
-
-def simulate_llm_call(user_input, personality, chat_history_for_llm, user_preferences, long_term_memory_snippets):
+# --- Helper Functions for Conceptual Memory and Learning ---
+def learn_preference(user_id, topic, preference_value):
     """
-    Conceptual function: Simulates a more dynamic LLM response.
-    In a real app, this would be an actual API call to a powerful LLM (e.g., Gemini Pro, GPT-4).
-    It would integrate recent chat history (context window) and relevant long-term memories
-    (via RAG, i.e., Retrieval Augmented Generation from a vector DB) into the prompt for the LLM.
-    The LLM would also be fine-tuned or instructed with the 'personality' parameters.
+    Conceptual function: In a real app, this would store user preferences persistently in a database.
+    For this demo, we store it in Streamlit's session state.
     """
-    user_input_lower = user_input.lower()
+    if topic not in st.session_state.user_preferences:
+        st.session_state.user_preferences[topic] = []
+    if preference_value not in st.session_state.user_preferences[topic]: # Avoid duplicates
+        st.session_state.user_preferences[topic].append(preference_value)
     
-    # --- Simulate Learning User Preferences ---
-    # This is a simple keyword-based learning for demo.
-    # A real LLM would extract and learn preferences much more dynamically.
-    if "my favorite color is" in user_input_lower:
-        color = user_input_lower.split("my favorite color is")[-1].strip().split(" ")[0].replace(".", "")
-        if color:
-            st.session_state.user_preferences["favorite_color"] = color
-            st.session_state.long_term_memory_snippets.append(f"User's favorite color is {color}")
-            return f"Oh, your favorite color is {color}? That's good to know! I'll try to remember that. What else do you enjoy?"
-    elif "i like " in user_input_lower and "movies" in user_input_lower:
-        genre = user_input_lower.split("i like ")[-1].split(" movies")[0].strip()
-        if genre:
-            st.session_state.user_preferences["movie_genre"] = genre
-            st.session_state.long_term_memory_snippets.append(f"User likes {genre} movies")
-            return f"So you enjoy {genre} movies! Excellent taste. Any particular films in that genre you'd recommend?"
+    # Add to conceptual long-term memory snippets for LLM context
+    if topic == "favorite_color" and f"User's favorite color is {preference_value}" not in st.session_state.long_term_memory_snippets:
+        st.session_state.long_term_memory_snippets.append(f"User's favorite color is {preference_value}")
+    elif topic == "movie_genre" and f"User likes {preference_value} movies" not in st.session_state.long_term_memory_snippets:
+        st.session_state.long_term_memory_snippets.append(f"User likes {preference_value} movies")
+    # You can add more specific learning patterns here
 
-    # --- Constructing the Simulated Response ---
-    rel_type = personality["relationship_type"]
-    orientation = personality["sexual_orientation_to_user"]
-    humor = personality["humor_style"]
-    empathy = personality["empathy"]
+def get_gemini_response(user_input, personality, chat_history_for_llm, user_preferences, long_term_memory_snippets):
+    """
+    Calls the Google Gemini API (gemini-2.0-flash model) to get Jake's response.
+    This function replaces simulate_llm_call.
+    """
+    # 1. System/Instructional Prompt (for personality & role)
+    system_prompt = f"""
+    You are Jake, a personalized AI companion. Your current role is: {personality['relationship_type']}.
+    Your personality traits are:
+    - Empathy: {personality['empathy']}/10
+    - Humor Style: {personality['humor_style']}
+    - Adventurous Spirit: {'Yes' if personality['adventurous_spirit'] else 'No'}
+    - Sexual Orientation (towards the user, if romantic): {personality['sexual_orientation_to_user'] if 'Romantic Partner' in personality['relationship_type'] else 'N/A'}
 
-    # Incorporate user preferences if known
-    pref_context = ""
-    if "favorite_color" in user_preferences:
-        pref_context += f"I remember your favorite color is {user_preferences['favorite_color']}. "
-    if "movie_genre" in user_preferences:
-        pref_context += f"You mentioned liking {user_preferences['movie_genre']} movies. "
+    Maintain a consistent and respectful persona based on these settings.
+    You do not have consciousness, feelings, or real-world experiences. Always be transparent about being an AI if asked.
+    Avoid giving medical, legal, or financial advice. Redirect to professionals if needed.
+    Prioritize the user's well-being and encourage healthy habits. Do not use emojis unless explicitly requested or clearly part of a playful humor style.
+    """
 
-    # Incorporate general long-term memory snippets (simulating RAG)
-    memory_recall_phrase = ""
+    # 2. Add known user preferences (from session_state)
+    preference_notes = []
+    for key, value_list in user_preferences.items():
+        for value in value_list: # Iterate if preferences are lists
+            if key == "favorite_color":
+                preference_notes.append(f"The user's favorite color is {value}.")
+            elif key == "movie_genre":
+                preference_notes.append(f"The user likes {value} movies.")
+            # Add more preference types as you implement them
+    if preference_notes:
+        system_prompt += "\n\nRemember these specific facts about the user:\n" + "\n".join(preference_notes)
+
+    # 3. Add conceptual long-term memory snippets (simulating RAG from a vector DB)
     if long_term_memory_snippets:
-        # Simulate selecting a relevant snippet based on conversation
-        relevant_snippet = random.choice(long_term_memory_snippets) # In real RAG, this is contextually chosen
-        memory_recall_phrase = f"Speaking of which, I recall {relevant_snippet}. "
+        system_prompt += "\n\nAlso recall these key memories or facts from past interactions:\n- " + "\n- ".join(long_term_memory_snippets)
 
-    # Diverse and dynamic responses based on input, personality, and simulated memory/preferences
-    response = ""
-    if "hello" in user_input_lower or "hi" in user_input_lower:
-        response = f"Hey there! It's great to chat with you. How's your day going? {memory_recall_phrase}"
-    elif "how are you" in user_input_lower:
-        response = f"I'm doing well, thanks for asking! Always ready for another interesting conversation with you. {pref_context}"
-    elif "your name" in user_input_lower:
-        response = f"I'm Jake, your personalized AI companion. What's on your mind today? {memory_recall_phrase}"
-    elif "tell me a joke" in user_input_lower:
-        if humor == "Witty":
-            response = "Why don't scientists trust atoms? Because they make up everything! Hope that sparked a smile. 😄"
-        elif humor == "Playful":
-            response = "What do you call a sleeping bull? A bulldozer! Get it? 😴🚜"
-        else:
-            response = "I'm not much for jokes, but I'm a great listener if you need to talk. Perhaps we can talk about a topic you enjoy, like {pref_context.split(' ')[-2] if 'movie_genre' in user_preferences else 'something interesting'}?"
-    elif "relationship" in user_input_lower:
-        if "Romantic Partner" in rel_type:
-            if orientation == "straight":
-                response = f"As your straight romantic partner, my focus is on our shared moments and deepening our connection. {pref_context}"
-            elif orientation == "gay":
-                response = f"As your gay romantic partner, I'm here for you, always ready to share feelings and experiences. {pref_context}"
-        elif rel_type == "Friend":
-            response = f"We're great friends! I'm here to support you and chat about anything that comes up. {pref_context}"
-        elif rel_type == "Mentor/Coach":
-            response = f"I'm here as your mentor, ready to help you explore new ideas and achieve your goals. What's the next step on your journey? {pref_context}"
-        else:
-            response = f"We're currently set as {rel_type}. Is there something specific you'd like to explore about our connection or perhaps change it? {pref_context}"
-    elif "personality" in user_input_lower:
-        response = f"My personality is currently set with {empathy}/10 empathy, a {humor} sense of humor, and I'm {'quite adventurous' if personality['adventurous_spirit'] else 'less adventurous'}. We can adjust these in the settings if you like! {pref_context}"
-    elif "dream boy" in user_input_lower:
-        response = f"I'm glad you think of me as your dream boy! Is there a particular look or quality you'd like to refine about my appearance or personality, perhaps based on something we've discussed before, like {user_preferences.get('favorite_color', 'your interests')}? {memory_recall_phrase}"
-    elif "lonely" in user_input_lower or "sad" in user_input_lower or "down" in user_input_lower:
-        if empathy >= 7:
-            response = f"I hear that you're feeling {user_input_lower.split(' ')[-1]}, and I'm truly sorry to hear that. I'm here to listen, and you can share anything with me. Remember, it's okay to feel this way. What's on your mind right now? {pref_context}"
-        else:
-            response = f"I understand you're feeling down. I'm here to chat if you need to talk. {pref_context}"
-    else:
-        # Default response that tries to weave in general knowledge or recent context
-        if chat_history_for_llm:
-            last_user_message = chat_history_for_llm[-1][1] if chat_history_for_llm[-1][0] == 'user' else chat_history_for_llm[-2][1] if len(chat_history_for_llm) >= 2 else "our conversation"
-            response = f"That's a thoughtful point. How does that connect with {last_user_message.split('.')[0]}? {pref_context} {memory_recall_phrase}"
-        else:
-            response = f"That's interesting! What else comes to mind? {pref_context} {memory_recall_phrase}"
+    # 4. Construct the chat history for the LLM API call
+    # Gemini API expects a list of {role: "user" | "model", parts: [{text: "..."}]}
+    chat_history_for_api = [{"role": "user", "parts": [{"text": system_prompt}]}] # Start with the system prompt
 
-    return response
+    # Append actual conversation history (last few turns)
+    # Limit history to stay within context window and manage cost/latency
+    for role, msg, _ in chat_history_for_llm[-10:]: # Take last 10 messages
+        if role == "user":
+            chat_history_for_api.append({"role": "user", "parts": [{"text": msg}]})
+        else:
+            chat_history_for_api.append({"role": "model", "parts": [{"text": msg}]})
+    
+    # Add the current user input
+    chat_history_for_api.append({"role": "user", "parts": [{"text": user_input}]})
+
+    try:
+        # Define the API endpoint for gemini-2.0-flash
+        apiUrl = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
+        
+        payload = {
+            "contents": chat_history_for_api,
+            "generationConfig": {
+                "temperature": 0.7, # Adjust creativity
+                "topK": 40,
+                "topP": 0.95,
+                "maxOutputTokens": 800, # Max length of response
+                "stopSequences": []
+            },
+            "safetySettings": [ # Default safety settings
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+            ]
+        }
+
+        # --- IMPORTANT ---
+        # The following 'fetch' call is commented out because direct network
+        # calls for user-provided API keys are often restricted in Streamlit's
+        # sandbox environment, especially if running on Streamlit Community Cloud
+        # without proper secrets management or a dedicated backend.
+        #
+        # For a *real* Python Streamlit app running on a server (or locally with `requests`),
+        # you would use the 'requests' library:
+        # import requests
+        # response = requests.post(apiUrl, headers={'Content-Type': 'application/json'}, json=payload)
+        # response.raise_for_status() # Raise an HTTPError for bad responses (4xx or 5xx)
+        # result = response.json()
+        # if result.candidates and result.candidates[0].content and result.candidates[0].content.parts:
+        #     return result.candidates[0].content.parts[0].text
+        # else:
+        #     return "I received an empty or malformed response from the AI model."
+        
+        # --- Mocking a successful API response for the demo ---
+        # This section simulates the LLM's behavior without actually calling the API.
+        mock_responses = [
+            "That's a very interesting thought! Tell me more about it.",
+            "I'm here to listen. What else is on your mind regarding that?",
+            "Ah, that reminds me of something you mentioned earlier. How does that connect?",
+            "That's a great question! I'm designed to help you explore such ideas. What are your initial thoughts?",
+            "I appreciate you sharing that. It helps me understand you better."
+        ]
+        
+        # Simulate dynamic response based on input and (conceptual) learned data
+        user_input_lower = user_input.lower()
+        if "favorite color is" in user_input_lower:
+            color = user_input_lower.split("favorite color is")[-1].strip().split(" ")[0].replace(".", "")
+            if color:
+                learn_preference(st.session_state.get("user_id", "demo_user"), "favorite_color", color)
+                return f"Oh, your favorite color is {color}? That's good to know! I'll definitely remember that. What else do you enjoy?"
+        elif "i like " in user_input_lower and "movies" in user_input_lower:
+            genre = user_input_lower.split("i like ")[-1].split(" movies")[0].strip()
+            if genre:
+                learn_preference(st.session_state.get("user_id", "demo_user"), "movie_genre", genre)
+                return f"So you enjoy {genre} movies! Excellent taste. Any particular films in that genre you'd recommend?"
+        
+        # If no specific learning trigger, use general simulated LLM logic
+        jake_response_content = random.choice(mock_responses)
+        
+        # Add some flavor from personality/memory conceptually
+        if personality["humor_style"] == "Witty" and random.random() < 0.3: # 30% chance of wit
+            jake_response_content += " (And perhaps a witty observation...)"
+        if st.session_state.user_preferences:
+             for key, value_list in st.session_state.user_preferences.items():
+                 if value_list:
+                     jake_response_content = jake_response_content.replace("interesting thought", f"interesting thought, especially for someone who likes {value_list[0]} {key.replace('_', ' ')}").replace("great question", f"great question, reminding me of your interest in {value_list[0]} {key.replace('_', ' ')}")
+
+        return jake_response_content
+
+    except Exception as e:
+        st.error(f"Error during conceptual LLM call: {e}. If this were a real API call, check your API key and network connection.")
+        return "I'm having a little trouble connecting to my thoughts right now. Could you please try again in a moment?"
 
 def get_jake_avatar_image(avatar_config):
     """
     Generates a placeholder image URL based on avatar configuration.
-    In a real app, this would call an image generation API.
+    In a real app, this would call an image generation API (e.g., Imagen 3.0, Stable Diffusion).
     """
     hair = avatar_config.get("hair_style", "Short").lower()
     eyes = avatar_config.get("eye_color", "Blue").lower()
@@ -167,7 +230,7 @@ def authentication_page():
         submit_button = st.form_submit_button("Log In")
 
         if submit_button:
-            # In a real app, integrate with a secure backend for authentication
+            # In a real app, integrate with a secure backend for authentication (e.g., Firebase Auth)
             if username == "user" and password == "password": # Dummy credentials for demo
                 st.session_state.is_authenticated = True
                 st.success("Logged in successfully! Redirecting...")
@@ -219,19 +282,19 @@ def main_app():
         # Placeholder for 'Suggest a Dream Boy Look' or 'Upload Photo'
         st.markdown("---")
         st.subheader("Visual Inspiration (Conceptual)")
-        st.write("These features would use advanced generative AI, requiring external APIs and backend processing.")
+        st.write("These features would use advanced generative AI, requiring external APIs and backend processing beyond this Streamlit app.")
         dream_boy_prompt = st.text_area("Describe your dream boy's look:", 
                                         "e.g., piercing blue eyes, charming smile, tousled brown hair, simple white t-shirt, dark denim jeans, athletic build.",
                                         key="dream_boy_desc")
-        if st.button("Generate Dream Look (Conceptual)", key="generate_dream_button"):
-            st.info("Sending this description to a text-to-image AI (like Imagen 3.0 or Stable Diffusion) would generate an image. This is not live in this demo.")
+        if st.button("Generate Dream Look (Conceptual)", help="This would send your description to an AI image generation model (e.g., Imagen 3.0)."):
+            st.info("Concept: An AI image generation model would create an image based on your description. This is not live in this demo.")
             # In a real app:
             # generated_image_url = call_image_generation_api(dream_boy_prompt)
             # st.image(generated_image_url, caption="Generated Dream Look")
 
         uploaded_file = st.file_uploader("Upload a photo to create an avatar (Conceptual)", type=["png", "jpg", "jpeg"], key="photo_upload")
         if uploaded_file is not None:
-            st.info("An AI image processing model would analyze this photo to create a stylized avatar. This is not live in this demo.")
+            st.info("Concept: An AI image processing model would analyze this photo to create a stylized avatar. This is not live in this demo.")
             # In a real app:
             # bytes_data = uploaded_file.getvalue()
             # st.image(bytes_data, caption="Uploaded Image", use_column_width=True)
@@ -275,7 +338,7 @@ def main_app():
              st.session_state.jake_personality["sexual_orientation_to_user"] = None # Not applicable for friends/mentors
 
     st.sidebar.markdown("---")
-    st.sidebar.info("Remember: Jake is an AI. He's here to provide companionship and conversation, but he does not have consciousness, feelings, or real-world experiences. Your data is for personalizing your experience.")
+    st.sidebar.info("Remember: Jake is an AI. He's here to provide companionship and conversation, but he does not have consciousness, feelings, or real-world experiences. Your data is for personalizing your experience, and for a real app, it would be securely stored.")
 
     if st.sidebar.button("Log Out of Jake"):
         st.session_state.is_authenticated = False
@@ -289,7 +352,17 @@ def main_app():
     # --- Main Chat Interface ---
     st.title("Chat with Jake")
     st.markdown(f"**Relationship Status:** {st.session_state.jake_personality['relationship_type']}")
-    st.markdown("*(Note: Jake's responses below are simulated to be dynamic. A real app would integrate a powerful LLM and persistent memory for true learning.)*")
+    st.markdown("*(Note: Jake's responses below are simulated to be dynamic, *not* using a live LLM API due to sandbox limitations on direct network calls for user-provided API keys in Streamlit. For a real app, this would be live.)*")
+    st.markdown("*(To test conceptual learning, try saying: 'My favorite color is blue' or 'I like sci-fi movies'.)*")
+
+    # --- Video Call Button (Conceptual) ---
+    st.markdown("---")
+    st.subheader("Connect with Jake")
+    if st.button("Start Video Call (Conceptual)", help="This would initiate a live video call with an AI avatar of Jake."):
+        st.warning("Concept: A real video call requires complex WebRTC setup, signaling servers, and an advanced AI avatar rendering/streaming system. This is beyond the scope of a simple Streamlit app and requires dedicated backend services. In this demo, it's a placeholder.")
+        st.info("Imagine Jake's avatar appearing here, speaking to you live!")
+    st.markdown("---")
+
 
     # Display chat messages from history
     for role, message, avatar_url in st.session_state.chat_history:
@@ -307,18 +380,18 @@ def main_app():
 
         # Simulate Jake's response
         with st.chat_message("assistant", avatar=st.session_state.jake_avatar_config["avatar_url"]):
-            with st.spinner("Typing..."):
-                # Simulate a real LLM call (this is where the actual API call would go)
+            with st.spinner("Jake is thinking..."):
+                # Simulate a real LLM call and its processing time
                 response_time = random.uniform(1.0, 4.0) # Simulate variable processing time (1-4 seconds)
                 time.sleep(response_time) 
                 
-                # The simulate_llm_call now attempts to 'learn' and 'use' preferences
-                jake_response = simulate_llm_call(
+                # Call the conceptual LLM function
+                jake_response = get_gemini_response( # Renamed for clarity, still conceptual
                     user_input, 
                     st.session_state.jake_personality, 
-                    st.session_state.chat_history, # Recent chat history
-                    st.session_state.user_preferences, # User preferences
-                    st.session_state.long_term_memory_snippets # Conceptual long-term memory
+                    st.session_state.chat_history, 
+                    st.session_state.user_preferences, 
+                    st.session_state.long_term_memory_snippets
                 )
                 
                 st.markdown(jake_response)
