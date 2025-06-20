@@ -5,7 +5,7 @@ import base64 # For potentially handling image uploads (though conversion is con
 
 # --- Configuration & Setup ---
 ST_CONFIG = {
-    "page_title": "Jake: Your Personalized AI Companion",
+    "page_title": "Hi, Jake here!",
     "page_icon": "🫂", # Placeholder icon
     "layout": "wide",
 }
@@ -307,7 +307,7 @@ def main_app():
 
         # Simulate Jake's response
         with st.chat_message("assistant", avatar=st.session_state.jake_avatar_config["avatar_url"]):
-            with st.spinner("Jake is thinking..."):
+            with st.spinner("Typing..."):
                 # Simulate a real LLM call (this is where the actual API call would go)
                 response_time = random.uniform(1.0, 4.0) # Simulate variable processing time (1-4 seconds)
                 time.sleep(response_time) 
